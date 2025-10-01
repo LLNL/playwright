@@ -194,6 +194,13 @@ export class Context {
 
   async dispose() {
     this._abortController.abort('MCP context disposed');
+    
+    // Dispose input recorder to flush pending actions
+    if (this._inputRecorder) {
+      await this._inputRecorder.dispose();
+      this._inputRecorder = undefined;
+    }
+    
     await this.closeBrowserContext();
     Context._allContexts.delete(this);
   }
@@ -893,18 +900,24 @@ export class InputRecorder {
   private async _initialize() {
     console.log('🎯 InputRecorder initializing...');
     const sessionLog = this._context.sessionLog!;
+    
+    // Handle page events to ensure recorder stays active across navigation
+    this._browserContext.on('page', (page) => {
+      console.log(`🎯 New page created during recording: ${page.url()}`);
+    });
+    
     await (this._browserContext as any)._enableRecorder({
       mode: 'recording',
       recorderMode: 'api',
     }, {
       actionAdded: async (page: playwright.Page, data: actions.ActionInContext, code: string) => {
-        console.log(`🎯 ActionAdded callback triggered: ${data.action.name}`);
+        console.log(`🎯 ActionAdded callback triggered: ${data.action.name} on page ${page.url()}`);
 
         if (this._context.isRunningTool()) {
           console.log(`❌ Skipping action - tool is running`);
           return;
         }
-        console.log(`✅ Tool not running, proceeding with action`);
+        console.log(`✅ Tool not running, proceeding with action on page ${page.url()}`);
 
         // Handle fill actions with debouncing to capture complete text
         if (data.action.name === 'fill' || data.action.name === 'type') {
@@ -922,19 +935,55 @@ export class InputRecorder {
         if (tab)
           sessionLog.logUserAction(data.action, tab, code, true);
       },
-      signalAdded: (page: playwright.Page, data: actions.SignalInContext) => {
+      signalAdded: async (page: playwright.Page, data: actions.SignalInContext) => {
         if (this._context.isRunningTool())
           return;
         if (data.signal.name !== 'navigation')
           return;
+        
+        console.log(`🎯 Navigation signal detected: ${data.signal.url}`);
+        
         const tab = Tab.forPage(page);
         const navigateAction: actions.Action = {
           name: 'navigate',
           url: data.signal.url,
           signals: [],
         };
-        if (tab)
+        
+        if (tab) {
           sessionLog.logUserAction(navigateAction, tab, `await page.goto('${data.signal.url}');`, false);
+          
+          // Also record in enhanced tracing system if active
+          if (this._context.isUserSessionActive() && this._context.isEnhancedTracingEnabled()) {
+            console.log(`✅ Enhanced tracing active, recording navigation`);
+            const sessionManager = this._context.getSessionSegmentManager();
+            if (sessionManager) {
+              console.log(`✅ Session manager found, recording navigation: ${data.signal.url}`);
+
+              const actionData: ActionData = {
+                timestamp: performance.now(),
+                callId: `action_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                action: {
+                  name: 'navigate',
+                  selector: '',
+                  text: undefined,
+                  key: undefined,
+                  url: data.signal.url
+                }
+              };
+
+              sessionManager.recordAction(actionData).catch(error => {
+                console.error('Failed to record navigation in session manager:', error);
+              });
+            } else {
+              console.log(`❌ No session manager found for navigation`);
+            }
+          } else {
+            console.log(`❌ Enhanced tracing not active for navigation: userSession=${this._context.isUserSessionActive()}, enhanced=${this._context.isEnhancedTracingEnabled()}`);
+          }
+        } else {
+          console.log(`❌ No tab found for navigation page`);
+        }
       },
     });
   }
