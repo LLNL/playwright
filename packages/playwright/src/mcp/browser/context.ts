@@ -62,6 +62,7 @@ export class Context {
   private _sessionSegmentManager: SessionSegmentManager | undefined;
   private _userSessionActive: boolean = false;
   private _enhancedTracingEnabled: boolean = false;
+  private _inputRecorder: InputRecorder | undefined;
 
   constructor(options: ContextOptions) {
     this.config = options.config;
@@ -235,7 +236,7 @@ export class Context {
     await this._setupRequestInterception(browserContext);
     if (this.sessionLog) {
       console.log('🎯 Creating InputRecorder - sessionLog exists');
-      await InputRecorder.create(this, browserContext);
+      this._inputRecorder = await InputRecorder.create(this, browserContext);
     } else {
       console.log('❌ No sessionLog - InputRecorder not created');
     }
@@ -855,6 +856,12 @@ function originOrHostGlob(originOrHost: string) {
 export class InputRecorder {
   private _context: Context;
   private _browserContext: playwright.BrowserContext;
+  private _pendingFillActions: Map<string, { 
+    data: actions.ActionInContext, 
+    timeout: NodeJS.Timeout,
+    accumulatedText: string 
+  }> = new Map();
+  private _fillDebounceMs = 500; // Wait 500ms after last keystroke
 
   private constructor(context: Context, browserContext: playwright.BrowserContext) {
     this._context = context;
@@ -865,6 +872,22 @@ export class InputRecorder {
     const recorder = new InputRecorder(context, browserContext);
     await recorder._initialize();
     return recorder;
+  }
+
+  /**
+   * Flush any pending fill actions and cleanup
+   */
+  async dispose() {
+    // Process any pending fill actions immediately
+    for (const [actionKey, pending] of this._pendingFillActions) {
+      clearTimeout(pending.timeout);
+      // Process the accumulated action
+      const page = this._browserContext.pages().find(p => pending.data.action.url && p.url().includes(pending.data.action.url));
+      if (page) {
+        await this._processAction(page, pending.data, '', false);
+      }
+    }
+    this._pendingFillActions.clear();
   }
 
   private async _initialize() {
@@ -883,45 +906,14 @@ export class InputRecorder {
         }
         console.log(`✅ Tool not running, proceeding with action`);
 
-        const tab = Tab.forPage(page);
-        if (tab) {
-          console.log(`✅ Found tab for page, logging action`);
-          sessionLog.logUserAction(data.action, tab, code, false);
-
-          // Also record in enhanced tracing system if active
-          if (this._context.isUserSessionActive() && this._context.isEnhancedTracingEnabled()) {
-            console.log(`✅ Enhanced tracing active, checking session manager`);
-            const sessionManager = this._context.getSessionSegmentManager();
-            if (sessionManager) {
-              console.log(`✅ Session manager found, recording action: ${data.action.name}`);
-
-              // Generate "Bounding box" trace entry for this user action
-              await this._generateBoundingBoxTraceEntry(page, data);
-
-              const actionData: ActionData = {
-                timestamp: performance.now(),
-                callId: `action_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-                action: {
-                  name: data.action.name,
-                  selector: (data.action as any).selector || '',
-                  text: (data.action as any).text,
-                  key: (data.action as any).key,
-                  url: (data.action as any).url
-                }
-              };
-
-              sessionManager.recordAction(actionData).catch(error => {
-                console.error('Failed to record action in session manager:', error);
-              });
-            } else {
-              console.log(`❌ No session manager found`);
-            }
-          } else {
-            console.log(`❌ Enhanced tracing not active: userSession=${this._context.isUserSessionActive()}, enhanced=${this._context.isEnhancedTracingEnabled()}`);
-          }
-        } else {
-          console.log(`❌ No tab found for page`);
+        // Handle fill actions with debouncing to capture complete text
+        if (data.action.name === 'fill' || data.action.name === 'type') {
+          await this._handleFillAction(page, data, code);
+          return;
         }
+
+        // Handle non-fill actions immediately
+        await this._processAction(page, data, code, false);
       },
       actionUpdated: (page: playwright.Page, data: actions.ActionInContext, code: string) => {
         if (this._context.isRunningTool())
@@ -945,6 +937,104 @@ export class InputRecorder {
           sessionLog.logUserAction(navigateAction, tab, `await page.goto('${data.signal.url}');`, false);
       },
     });
+  }
+
+  /**
+   * Handle fill actions with debouncing to capture complete text
+   */
+  private async _handleFillAction(page: playwright.Page, data: actions.ActionInContext, code: string) {
+    const selector = (data.action as any).selector || '';
+    const text = (data.action as any).text || '';
+    const actionKey = `${page.url()}_${selector}`;
+
+    console.log(`🎯 Fill action: selector="${selector}", text="${text}"`);
+
+    // Cancel any existing timeout for this selector
+    const pending = this._pendingFillActions.get(actionKey);
+    if (pending) {
+      clearTimeout(pending.timeout);
+      console.log(`🎯 Canceling previous fill timeout, accumulated: "${pending.accumulatedText}"`);
+    }
+
+    // Accumulate text from multiple fill events
+    const accumulatedText = pending ? pending.accumulatedText + text : text;
+    console.log(`🎯 Accumulated text: "${accumulatedText}"`);
+
+    // Set up debounced action processing
+    const timeout = setTimeout(async () => {
+      console.log(`🎯 Fill debounce timeout reached, processing complete text: "${accumulatedText}"`);
+      this._pendingFillActions.delete(actionKey);
+      
+      // Create enhanced action data with complete text
+      const enhancedData = {
+        ...data,
+        action: {
+          ...data.action,
+          text: accumulatedText
+        }
+      };
+
+      await this._processAction(page, enhancedData, code, false);
+    }, this._fillDebounceMs);
+
+    // Store pending action
+    this._pendingFillActions.set(actionKey, {
+      data: {
+        ...data,
+        action: {
+          ...data.action,
+          text: accumulatedText
+        }
+      },
+      timeout,
+      accumulatedText
+    });
+  }
+
+  /**
+   * Process an action (both fill and non-fill actions)
+   */
+  private async _processAction(page: playwright.Page, data: actions.ActionInContext, code: string, isUpdate: boolean) {
+    const tab = Tab.forPage(page);
+    if (tab) {
+      console.log(`✅ Found tab for page, logging action: ${data.action.name}`);
+      const sessionLog = this._context.sessionLog!;
+      sessionLog.logUserAction(data.action, tab, code, isUpdate);
+
+      // Also record in enhanced tracing system if active
+      if (this._context.isUserSessionActive() && this._context.isEnhancedTracingEnabled()) {
+        console.log(`✅ Enhanced tracing active, checking session manager`);
+        const sessionManager = this._context.getSessionSegmentManager();
+        if (sessionManager) {
+          console.log(`✅ Session manager found, recording action: ${data.action.name}`);
+
+          // Generate "Bounding box" trace entry for this user action
+          await this._generateBoundingBoxTraceEntry(page, data);
+
+          const actionData: ActionData = {
+            timestamp: performance.now(),
+            callId: `action_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            action: {
+              name: data.action.name,
+              selector: (data.action as any).selector || '',
+              text: (data.action as any).text,
+              key: (data.action as any).key,
+              url: (data.action as any).url
+            }
+          };
+
+          sessionManager.recordAction(actionData).catch(error => {
+            console.error('Failed to record action in session manager:', error);
+          });
+        } else {
+          console.log(`❌ No session manager found`);
+        }
+      } else {
+        console.log(`❌ Enhanced tracing not active: userSession=${this._context.isUserSessionActive()}, enhanced=${this._context.isEnhancedTracingEnabled()}`);
+      }
+    } else {
+      console.log(`❌ No tab found for page`);
+    }
   }
 
   /**

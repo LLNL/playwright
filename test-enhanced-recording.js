@@ -10,7 +10,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import fs from 'fs';
 import * as path from 'path';
 import readline from 'readline'
-import { spawn } from 'child_process'
+import { exec } from 'child_process'
 
 async function startEnhancedTracingSession() {
   console.log('🎯 Starting LLNL Enhanced Tracing Session with Intelligent Action Recording\n');
@@ -128,7 +128,7 @@ async function startEnhancedTracingSession() {
     const traceFileName = traceFileMatch ? traceFileMatch[1] : 'trace-001.zip';
 
     const traceFile = path.join(process.cwd(), traceFileName)
-    const traceViewer = spawn('npx', ['playwright', 'show-trace', traceFile], {
+    const traceViewer = exec(`node packages/playwright/cli.js show-trace "${traceFile}"`, {
       stdio: 'inherit',
       shell: true,
       cwd: process.cwd() + "..",
@@ -138,7 +138,7 @@ async function startEnhancedTracingSession() {
     // Don't wait for the trace viewer to close
     traceViewer.unref();
 
-    console.log(`📊 Trace viewer command: npx playwright show-trace "${traceFile}"`);
+    console.log(`📊 Trace viewer command: node packages/playwright/cli.js show-trace "${traceFile}"`);
     console.log(`🎯 Look for intelligent action names like "Click Submit Button" instead of "Bounding box"`);
   } catch (error) {
     console.error('❌ Test error:', error);
