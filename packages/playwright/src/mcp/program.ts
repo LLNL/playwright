@@ -50,6 +50,8 @@ export function decorateCommand(command: Command, version: string) {
       .option('--proxy-server <proxy>', 'specify proxy server, for example "http://myproxy:3128" or "socks5://myproxy:8080"')
       .option('--save-session', 'Whether to save the Playwright MCP session into the output directory.')
       .option('--save-trace', 'Whether to save the Playwright Trace of the session into the output directory.')
+      .option('--enhanced-tracing', 'Enable user action recording with trace post-processing')
+      .option('--max-actions-per-segment <number>', 'Maximum actions per trace segment for enhanced tracing (default: 120)', numberParser)
       .option('--secrets <path>', 'path to a file containing secrets in the dotenv format', dotenvFileLoader)
       .option('--storage-state <path>', 'path to the storage state file for isolated sessions.')
       .option('--timeout-action <timeout>', 'specify action timeout in milliseconds, defaults to 5000ms', numberParser)
