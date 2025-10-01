@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 
-import { callLogText, expectTypes } from '../util';
-import { matcherHint } from './matcherHint';
-import { runBrowserBackendOnError } from '../mcp/test/browserBackend';
+import { expectTypes } from '../util';
+import { formatMatcherMessage } from './matcherHint';
 
 import type { MatcherResult } from './matcherHint';
 import type { ExpectMatcherState } from '../../types/test';
@@ -25,19 +24,14 @@ import type { Locator } from 'playwright-core';
 export async function toBeTruthy(
   this: ExpectMatcherState,
   matcherName: string,
-  receiver: Locator,
+  locator: Locator,
   receiverType: string,
   expected: string,
   arg: string,
   query: (isNot: boolean, timeout: number) => Promise<{ matches: boolean, log?: string[], received?: any, timedOut?: boolean, errorMessage?: string }>,
   options: { timeout?: number } = {},
 ): Promise<MatcherResult<any, any>> {
-  expectTypes(receiver, [receiverType], matcherName);
-
-  const matcherOptions = {
-    isNot: this.isNot,
-    promise: this.promise,
-  };
+  expectTypes(locator, [receiverType], matcherName);
 
   const timeout = options.timeout ?? this.timeout;
 
@@ -56,18 +50,24 @@ export async function toBeTruthy(
   let printedExpected: string | undefined;
   if (pass) {
     printedExpected = `Expected: not ${expected}`;
-    printedReceived = errorMessage ?? `Received: ${expected}`;
+    printedReceived = errorMessage ? '' : `Received: ${expected}`;
   } else {
     printedExpected = `Expected: ${expected}`;
-    printedReceived = errorMessage ?? `Received: ${received}`;
+    printedReceived = errorMessage ? '' : `Received: ${received}`;
   }
   const message = () => {
-    const header = matcherHint(this, receiver, matcherName, 'locator', arg, matcherOptions, timedOut ? timeout : undefined, `${printedExpected}\n${printedReceived}`);
-    const logText = callLogText(log);
-    return `${header}${logText}`;
+    return formatMatcherMessage(this, {
+      matcherName,
+      expectation: arg,
+      locator,
+      timeout,
+      timedOut,
+      printedExpected,
+      printedReceived,
+      errorMessage,
+      log,
+    });
   };
-
-  await runBrowserBackendOnError(receiver.page(), message);
 
   return {
     message,

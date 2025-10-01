@@ -16,38 +16,68 @@
 
 import * as mcp from '../sdk/exports';
 import { TestContext } from './testContext';
-import { listTests, runTests, debugTest } from './testTools.js';
-import { snapshot, pickLocator, evaluate } from './browserTools';
+import * as testTools from './testTools.js';
+import * as generatorTools from './generatorTools.js';
+import * as plannerTools from './plannerTools.js';
+import { browserTools } from '../browser/tools';
+import { resolveConfigLocation } from '../../common/configLoader';
 
-import type { ConfigLocation } from '../../common/config';
 import type { TestTool } from './testTool';
-
 
 export class TestServerBackend implements mcp.ServerBackend {
   readonly name = 'Playwright';
   readonly version = '0.0.1';
-  private _tools: TestTool<any>[] = [listTests, runTests, debugTest];
+  private _tools: TestTool<any>[] = [
+    plannerTools.setupPage,
+    generatorTools.setupPage,
+    generatorTools.generatorLogStep,
+    generatorTools.generatorReadLog,
+    generatorTools.generatorWriteTest,
+    testTools.listTests,
+    testTools.runTests,
+    testTools.debugTest,
+  ];
   private _context: TestContext;
+  private _configOption: string | undefined;
 
-  constructor(resolvedLocation: ConfigLocation, options?: { muteConsole?: boolean }) {
-    this._context = new TestContext(resolvedLocation, options);
+  static allowedOnPause: string[] = [
+    generatorTools.generatorLogStep.schema.name,
+  ];
+
+  constructor(configOption: string | undefined, options?: { muteConsole?: boolean, headless?: boolean }) {
+    this._context = new TestContext(options);
+    this._configOption = configOption;
+  }
+
+  async initialize(server: mcp.Server, clientInfo: mcp.ClientInfo): Promise<void> {
+    const rootPath = mcp.firstRootPath(clientInfo);
+
+    if (this._configOption) {
+      this._context.initialize(rootPath, resolveConfigLocation(this._configOption));
+      return;
+    }
+
+    if (rootPath) {
+      this._context.initialize(rootPath, resolveConfigLocation(rootPath));
+      return;
+    }
+
+    throw new Error('No config option or MCP root path provided');
   }
 
   async listTools(): Promise<mcp.Tool[]> {
     return [
       ...this._tools.map(tool => mcp.toMcpTool(tool.schema)),
-      mcp.toMcpTool(snapshot.schema),
-      mcp.toMcpTool(pickLocator.schema),
-      mcp.toMcpTool(evaluate.schema),
+      ...browserTools.map(tool => mcp.toMcpTool(tool.schema)),
     ];
   }
 
-  async callTool(name: string, args: mcp.CallToolRequest['params']['arguments']): Promise<mcp.CallToolResult> {
+  async callTool(name: string, args: mcp.CallToolRequest['params']['arguments'], progress: mcp.ProgressCallback): Promise<mcp.CallToolResult> {
     const tool = this._tools.find(tool => tool.schema.name === name);
     if (!tool)
       throw new Error(`Tool not found: ${name}. Available tools: ${this._tools.map(tool => tool.schema.name).join(', ')}`);
     const parsedArguments = tool.schema.inputSchema.parse(args || {});
-    return await tool.handle(this._context!, parsedArguments);
+    return await tool.handle(this._context!, parsedArguments, progress);
   }
 
   serverClosed() {

@@ -15,19 +15,25 @@
  */
 
 import type { TestResult } from '../../types/testReporter';
-import type { FullConfigInternal } from '../common/config';
+import type { FullConfigInternal, FullProjectInternal } from '../common/config';
 import type { Suite, TestCase } from '../common/test';
 
 export class FailureTracker {
   private _failureCount = 0;
   private _hasWorkerErrors = false;
   private _rootSuite: Suite | undefined;
+  private _topLevelProjects: FullProjectInternal[] = [];
+  private _pauseOnError: boolean;
+  private _pauseAtEnd: boolean;
 
-  constructor(private _config: FullConfigInternal) {
+  constructor(private _config: FullConfigInternal, options?: { pauseOnError?: boolean, pauseAtEnd?: boolean }) {
+    this._pauseOnError = options?.pauseOnError ?? false;
+    this._pauseAtEnd = options?.pauseAtEnd ?? false;
   }
 
-  onRootSuite(rootSuite: Suite) {
+  onRootSuite(rootSuite: Suite, topLevelProjects: FullProjectInternal[]) {
     this._rootSuite = rootSuite;
+    this._topLevelProjects = topLevelProjects;
   }
 
   onTestEnd(test: TestCase, result: TestResult) {
@@ -38,6 +44,14 @@ export class FailureTracker {
 
   onWorkerError() {
     this._hasWorkerErrors = true;
+  }
+
+  pauseOnError(): boolean {
+    return this._pauseOnError;
+  }
+
+  pauseAtEnd(inProject: FullProjectInternal): boolean {
+    return this._pauseAtEnd && this._topLevelProjects.includes(inProject);
   }
 
   hasReachedMaxFailures() {

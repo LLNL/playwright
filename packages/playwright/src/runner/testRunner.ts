@@ -19,7 +19,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { registry } from 'playwright-core/lib/server';
-import { ManualPromise, gracefullyProcessExitDoNotHang } from 'playwright-core/lib/utils';
+import { ManualPromise, gracefullyProcessExitDoNotHang, setPlaywrightTestProcessEnv } from 'playwright-core/lib/utils';
 
 import { loadConfig } from '../common/configLoader';
 import { Watcher } from '../fsWatcher';
@@ -71,6 +71,11 @@ export type RunTestsParams = {
   projects?: string[];
   reuseContext?: boolean;
   connectWsEndpoint?: string;
+  pauseOnError?: boolean;
+  pauseAtEnd?: boolean;
+  doNotRunDepsOutsideProjectFilter?: boolean;
+  disableConfigReporters?: boolean;
+  failOnLoadErrors?: boolean;
 };
 
 type FullResultStatus = reporterTypes.FullResult['status'];
@@ -107,6 +112,7 @@ export class TestRunner extends EventEmitter<TestRunnerEventMap> {
     watchTestDirs?: boolean;
     populateDependenciesOnList?: boolean;
   }) {
+    setPlaywrightTestProcessEnv();
     this._watchTestDirs = !!params.watchTestDirs;
     this._populateDependenciesOnList = !!params.populateDependenciesOnList;
   }
@@ -134,6 +140,13 @@ export class TestRunner extends EventEmitter<TestRunnerEventMap> {
   async installBrowsers() {
     const executables = registry.defaultExecutables();
     await registry.install(executables, false);
+  }
+
+  async loadConfig() {
+    const { config, error } = await this._loadConfig(this._configCLIOverrides);
+    if (config)
+      return config;
+    throw new Error('Failed to load config: ' + (error ? error.message : 'Unknown error'));
   }
 
   async runGlobalSetup(userReporters: AnyReporter[]): Promise<{ status: FullResultStatus }> {
@@ -327,15 +340,15 @@ export class TestRunner extends EventEmitter<TestRunnerEventMap> {
       config.preOnlyTestFilters.push(test => testIdSet.has(test.id));
     }
 
-    const configReporters = await createReporters(config, 'test', true);
+    const configReporters = params.disableConfigReporters ? [] : await createReporters(config, 'test', true);
     const reporter = new InternalReporter([...configReporters, userReporter]);
     const stop = new ManualPromise();
     const tasks = [
       createApplyRebaselinesTask(),
-      createLoadTask('out-of-process', { filterOnly: true, failOnLoadErrors: false, doNotRunDepsOutsideProjectFilter: true }),
+      createLoadTask('out-of-process', { filterOnly: true, failOnLoadErrors: !!params.failOnLoadErrors, doNotRunDepsOutsideProjectFilter: params.doNotRunDepsOutsideProjectFilter }),
       ...createRunTestsTasks(config),
     ];
-    const testRun = new TestRun(config, reporter);
+    const testRun = new TestRun(config, reporter, { pauseOnError: params.pauseOnError, pauseAtEnd: params.pauseAtEnd });
     const run = runTasks(testRun, tasks, 0, stop).then(async status => {
       this._testRun = undefined;
       return status;
@@ -431,6 +444,8 @@ async function resolveCtDirs(config: FullConfigInternal) {
 }
 
 export async function runAllTestsWithConfig(config: FullConfigInternal): Promise<FullResultStatus> {
+  setPlaywrightTestProcessEnv();
+
   const listOnly = config.cliListOnly;
 
   addGitCommitInfoPlugin(config);
@@ -440,7 +455,8 @@ export async function runAllTestsWithConfig(config: FullConfigInternal): Promise
 
   const reporters = await createReporters(config, listOnly ? 'list' : 'test', false);
   const lastRun = new LastRunReporter(config);
-  await lastRun.applyFilter();
+  if (config.cliLastFailed)
+    await lastRun.filterLastFailed();
 
   const reporter = new InternalReporter([...reporters, lastRun]);
   const tasks = listOnly ? [

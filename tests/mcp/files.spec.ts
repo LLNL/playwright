@@ -100,7 +100,7 @@ test('browser_file_upload', async ({ client, server }, testInfo) => {
   }
 });
 
-test('clicking on download link emits download', async ({ startClient, server, mcpMode }, testInfo) => {
+test('clicking on download link emits download', async ({ startClient, server }, testInfo) => {
   const { client } = await startClient({
     config: { outputDir: testInfo.outputPath('output') },
   });
@@ -126,12 +126,12 @@ test('clicking on download link emits download', async ({ startClient, server, m
   });
 });
 
-test('navigating to download link emits download', async ({ startClient, server, mcpBrowser, mcpMode }, testInfo) => {
+test('navigating to download link emits download', async ({ startClient, server, mcpBrowser }, testInfo) => {
+  test.skip(mcpBrowser !== 'chromium', 'This test is racy');
   const { client } = await startClient({
     config: { outputDir: testInfo.outputPath('output') },
   });
 
-  test.skip(mcpBrowser !== 'chromium', 'This test is racy');
   server.setRoute('/download', (req, res) => {
     res.writeHead(200, {
       'Content-Type': 'text/plain',

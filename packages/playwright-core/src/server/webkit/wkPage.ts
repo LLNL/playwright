@@ -24,7 +24,6 @@ import { eventsHelper } from '../utils/eventsHelper';
 import { hostPlatform } from '../utils/hostPlatform';
 import { splitErrorMessage } from '../../utils/isomorphic/stackTrace';
 import { PNG, jpegjs } from '../../utilsBundle';
-import { BrowserContext } from '../browserContext';
 import * as dialog from '../dialog';
 import * as dom from '../dom';
 import { TargetClosedError } from '../errors';
@@ -39,6 +38,7 @@ import { WKInterceptableRequest, WKRouteImpl } from './wkInterceptableRequest';
 import { WKProvisionalPage } from './wkProvisionalPage';
 import { WKWorkers } from './wkWorkers';
 import { debugLogger } from '../utils/debugLogger';
+import { translatePathToWSL } from './webkit';
 
 import type { Protocol } from './protocol';
 import type { WKBrowserContext } from './wkBrowser';
@@ -308,6 +308,9 @@ export class WKPage implements PageDelegate {
         session.dispatchMessage({ id: message.id, error: { message: e.message } });
       });
     });
+    // TODO: support OOPIFs.
+    if (targetInfo.type === 'frame' as any)
+      return;
     assert(targetInfo.type === 'page', 'Only page targets are expected in WebKit, received: ' + targetInfo.type);
 
     if (!targetInfo.isProvisional) {
@@ -539,7 +542,7 @@ export class WKPage implements PageDelegate {
       error.stack = stack;
       error.name = name;
 
-      this._page.emitOnContextOnceInitialized(BrowserContext.Events.PageError, error, this._page);
+      this._page.addPageError(error);
       return;
     }
 
@@ -842,7 +845,7 @@ export class WKPage implements PageDelegate {
   private async _startVideo(options: types.PageScreencastOptions): Promise<void> {
     assert(!this._recordingVideoFile);
     const { screencastId } = await this._pageProxySession.send('Screencast.startVideo', {
-      file: options.outputFile,
+      file: this._browserContext._browser.options.channel === 'webkit-wsl' ? await translatePathToWSL(options.outputFile) : options.outputFile,
       width: options.width,
       height: options.height,
       toolbarHeight: this._toolbarHeight()
@@ -976,6 +979,8 @@ export class WKPage implements PageDelegate {
   async setInputFilePaths(handle: dom.ElementHandle<HTMLInputElement>, paths: string[]): Promise<void> {
     const pageProxyId = this._pageProxySession.sessionId;
     const objectId = handle._objectId;
+    if (this._browserContext._browser?.options.channel === 'webkit-wsl')
+      paths = await Promise.all(paths.map(path => translatePathToWSL(path)));
     await Promise.all([
       this._pageProxySession.connection.browserSession.send('Playwright.grantFileReadAccess', { pageProxyId, paths }),
       this._session.send('DOM.setInputFiles', { objectId, paths })

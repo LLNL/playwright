@@ -14,72 +14,60 @@
  * limitations under the License.
  */
 
-import { noColors } from 'playwright-core/lib/utils';
-
 import { z } from '../sdk/bundle';
-import { terminalScreen } from '../../reporters/base';
 import ListReporter from '../../reporters/list';
 import ListModeReporter from '../../reporters/listModeReporter';
-
 import { defineTestTool } from './testTool';
-import { StringWriteStream } from './streams';
 
 export const listTests = defineTestTool({
   schema: {
-    name: 'playwright_test_list_tests',
+    name: 'test_list',
     title: 'List tests',
     description: 'List tests',
     inputSchema: z.object({}),
     type: 'readOnly',
   },
 
-  handle: async context => {
-    const { screen, stream } = createScreen();
+  handle: async (context, _, progress) => {
+    const { screen } = context.createScreen(progress);
     const reporter = new ListModeReporter({ screen, includeTestId: true });
     const testRunner = await context.createTestRunner();
     await testRunner.listTests(reporter, {});
 
-    return {
-      content: [{ type: 'text', text: stream.content() }],
-    };
+    return { content: [] };
   },
 });
 
 export const runTests = defineTestTool({
   schema: {
-    name: 'playwright_test_run_tests',
+    name: 'test_run',
     title: 'Run tests',
     description: 'Run tests',
     inputSchema: z.object({
-      locations: z.array(z.string()).describe('Folder, file or location to run: "test/e2e" or "test/e2e/file.spec.ts" or "test/e2e/file.spec.ts:20"'),
+      locations: z.array(z.string()).optional().describe('Folder, file or location to run: "test/e2e" or "test/e2e/file.spec.ts" or "test/e2e/file.spec.ts:20"'),
       projects: z.array(z.string()).optional().describe('Projects to run, projects from playwright.config.ts, by default runs all projects. Running with "chromium" is a good start'),
     }),
     type: 'readOnly',
   },
 
-  handle: async (context, params) => {
-    const { screen, stream } = createScreen();
+  handle: async (context, params, progress) => {
+    const { screen } = context.createScreen(progress);
     const configDir = context.configLocation.configDir;
-    const reporter = new ListReporter({ configDir, screen, includeTestId: true });
+    const reporter = new ListReporter({ configDir, screen, includeTestId: true, prefixStdio: 'out' });
     const testRunner = await context.createTestRunner();
-    const result = await testRunner.runTests(reporter, {
+    await testRunner.runTests(reporter, {
       locations: params.locations,
       projects: params.projects,
+      disableConfigReporters: true,
     });
 
-    const text = stream.content();
-    return {
-      content: [
-        { type: 'text', text },
-      ],
-      isError: result.status !== 'passed',
-    };
+    return { content: [] };
   },
 });
 
 export const debugTest = defineTestTool({
   schema: {
-    name: 'playwright_test_debug_test',
+    name: 'test_debug',
     title: 'Debug single test',
     description: 'Debug single test',
     inputSchema: z.object({
@@ -91,47 +79,21 @@ export const debugTest = defineTestTool({
     type: 'readOnly',
   },
 
-  handle: async (context, params) => {
-    const stream = new StringWriteStream();
-    const screen = {
-      ...terminalScreen,
-      isTTY: false,
-      colors: noColors,
-      stdout: stream as unknown as NodeJS.WriteStream,
-      stderr: stream as unknown as NodeJS.WriteStream,
-    };
+  handle: async (context, params, progress) => {
+    const { screen } = context.createScreen(progress);
     const configDir = context.configLocation.configDir;
-    const reporter = new ListReporter({ configDir, screen });
+    const reporter = new ListReporter({ configDir, screen, includeTestId: true, prefixStdio: 'out' });
     const testRunner = await context.createTestRunner();
-    process.env.PLAYWRIGHT_DEBUGGER_ENABLED = '1';
-    const result = await testRunner.runTests(reporter, {
-      headed: true,
+    await testRunner.runTests(reporter, {
+      headed: !context.options?.headless,
       testIds: [params.test.id],
       // For automatic recovery
       timeout: 0,
       workers: 1,
-    }).finally(() => {
-      process.env.PLAYWRIGHT_DEBUGGER_ENABLED = undefined;
+      pauseOnError: true,
+      disableConfigReporters: true,
     });
 
-    const text = stream.content();
-    return {
-      content: [
-        { type: 'text', text },
-      ],
-      isError: result.status !== 'passed',
-    };
+    return { content: [] };
   },
 });
-
-function createScreen() {
-  const stream = new StringWriteStream();
-  const screen = {
-    ...terminalScreen,
-    isTTY: false,
-    colors: noColors,
-    stdout: stream as unknown as NodeJS.WriteStream,
-    stderr: stream as unknown as NodeJS.WriteStream,
-  };
-  return { screen, stream };
-}

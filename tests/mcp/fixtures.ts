@@ -34,7 +34,7 @@ import type { ServerFixtures, ServerWorkerOptions } from '../config/serverFixtur
 export type TestOptions = {
   mcpArgs: string[] | undefined;
   mcpBrowser: string | undefined;
-  mcpMode: 'docker' | undefined;
+  mcpServerType: 'mcp' | 'test-mcp';
 };
 
 type CDPServer = {
@@ -48,6 +48,7 @@ export type StartClient = (options?: {
   config?: Config,
   roots?: { name: string, uri: string }[],
   rootsResponseDelay?: number,
+  env?: NodeJS.ProcessEnv,
 }) => Promise<{ client: Client, stderr: () => string }>;
 
 
@@ -75,25 +76,33 @@ export const test = serverTest.extend<TestFixtures & TestOptions, WorkerFixtures
     await use(client);
   },
 
-  startClient: async ({ mcpHeadless, mcpBrowser, mcpMode, mcpArgs }, use, testInfo) => {
+  startClient: async ({ mcpHeadless, mcpBrowser, mcpArgs, mcpServerType }, use, testInfo) => {
     const configDir = path.dirname(test.info().config.configFile!);
     const clients: Client[] = [];
 
     await use(async options => {
       const args: string[] = mcpArgs ?? [];
-      if (process.env.CI && process.platform === 'linux')
-        args.push('--no-sandbox');
+
       if (mcpHeadless)
         args.push('--headless');
-      if (mcpBrowser)
-        args.push(`--browser=${mcpBrowser}`);
+
+      if (mcpServerType === 'test-mcp') {
+        if (!options?.args?.some(arg => arg.startsWith('--config')))
+          args.push('--config', test.info().outputPath());
+      } else {
+        if (process.env.CI && process.platform === 'linux')
+          args.push('--no-sandbox');
+        if (mcpBrowser)
+          args.push(`--browser=${mcpBrowser}`);
+        if (options?.config) {
+          const configFile = testInfo.outputPath('config.json');
+          await fs.promises.writeFile(configFile, JSON.stringify(options.config, null, 2));
+          args.push(`--config=${path.relative(configDir, configFile)}`);
+        }
+      }
+
       if (options?.args)
         args.push(...options.args);
-      if (options?.config) {
-        const configFile = testInfo.outputPath('config.json');
-        await fs.promises.writeFile(configFile, JSON.stringify(options.config, null, 2));
-        args.push(`--config=${path.relative(configDir, configFile)}`);
-      }
 
       const client = new Client({ name: options?.clientName ?? 'test', version: '1.0.0' }, options?.roots ? { capabilities: { roots: {} } } : undefined);
       if (options?.roots) {
@@ -105,10 +114,11 @@ export const test = serverTest.extend<TestFixtures & TestOptions, WorkerFixtures
           };
         });
       }
-      const { transport, stderr } = await createTransport(args, mcpMode, testInfo.outputPath('ms-playwright'));
+      const env = { ...process.env, ...options?.env };
+      const { transport, stderr } = await createTransport(mcpServerType, args, env);
       let stderrBuffer = '';
       stderr?.on('data', data => {
-        if (process.env.PWMCP_DEBUG)
+        if (process.env.PWDEBUGIMPL)
           process.stderr.write(data);
         stderrBuffer += data.toString();
       });
@@ -131,7 +141,7 @@ export const test = serverTest.extend<TestFixtures & TestOptions, WorkerFixtures
     test.skip(!['chrome', 'msedge', 'chromium'].includes(mcpBrowser!), 'CDP is not supported for non-Chromium browsers');
 
     let browserContext: BrowserContext | undefined;
-    const port = 3200 + test.info().parallelIndex;
+    const port = 9100 + testInfo.workerIndex;
     await use({
       endpoint: `http://localhost:${port}`,
       start: async () => {
@@ -166,33 +176,21 @@ export const test = serverTest.extend<TestFixtures & TestOptions, WorkerFixtures
 
   mcpBrowser: ['chrome', { option: true }],
 
-  mcpMode: [undefined, { option: true }],
+  mcpServerType: ['mcp', { option: true }],
 });
 
-async function createTransport(args: string[], mcpMode: TestOptions['mcpMode'], profilesDir: string): Promise<{
+async function createTransport(mcpServerType: TestOptions['mcpServerType'], args: string[], env: NodeJS.ProcessEnv): Promise<{
   transport: Transport,
   stderr: Stream | null,
 }> {
-  if (mcpMode === 'docker') {
-    const dockerArgs = ['run', '--rm', '-i', '--network=host', '-v', `${test.info().project.outputDir}:/app/test-results`];
-    const transport = new StdioClientTransport({
-      command: 'docker',
-      args: [...dockerArgs, 'playwright-mcp-dev:latest', ...args],
-    });
-    return {
-      transport,
-      stderr: transport.stderr,
-    };
-  }
-
+  const profilesDir = test.info().outputPath('ms-playwright');
   const transport = new StdioClientTransport({
     command: 'node',
-    args: [...programPath, ...args],
-    cwd: path.dirname(test.info().config.configFile!),
+    args: [...(mcpServerType === 'test-mcp' ? testMcpServerPath : mcpServerPath), ...args],
+    cwd: test.info().outputPath(),
     stderr: 'pipe',
     env: {
-      ...process.env,
-      DEBUG: 'pw:mcp:test',
+      ...env,
       DEBUG_COLORS: '0',
       DEBUG_HIDE_DATE: '1',
       PWMCP_PROFILES_DIR_FOR_TEST: profilesDir,
@@ -226,13 +224,37 @@ export const expect = baseExpect.extend({
       message: () => ``,
     };
   },
+
+  toHaveTextResponse(response: Response, value: any) {
+    const text = response.content[0].text
+        .replace(/\[id=[^\]]+\]/g, '[id=<ID>]')
+        .replace(/\([\d\.]+m?s\)/g, '(XXms)')
+        .replace(/[✓] /g, 'ok');
+
+    const isNot = this.isNot;
+    try {
+      if (isNot)
+        expect(text).not.toEqual(value);
+      else
+        expect(text).toEqual(value);
+    } catch (e) {
+      return {
+        pass: isNot,
+        message: () => e.message,
+      };
+    }
+    return {
+      pass: !isNot,
+      message: () => ``,
+    };
+  },
 });
 
 export function formatOutput(output: string): string[] {
   return output.split('\n').map(line => line.replace(/^pw:mcp:test /, '').replace(/user data dir.*/, 'user data dir').trim()).filter(Boolean);
 }
 
-function parseResponse(response: any) {
+export function parseResponse(response: any) {
   const text = response.content[0].text;
   const sections = parseSections(text);
 
@@ -277,4 +299,54 @@ function parseSections(text: string): Map<string, string> {
   return sections;
 }
 
-export const programPath = [path.join(__dirname, '../../packages/playwright/cli.js'), 'run-mcp-server'];
+export const mcpServerPath = [path.join(__dirname, '../../packages/playwright/cli.js'), 'run-mcp-server'];
+export const testMcpServerPath = [path.join(__dirname, '../../packages/playwright-test/cli.js'), 'run-test-mcp-server'];
+
+type Files = { [key: string]: string | Buffer };
+
+export async function writeFiles(files: Files, options?: { update?: boolean }) {
+  const baseDir = test.info().outputPath();
+
+  if (!options?.update && !Object.keys(files).some(name => name.includes('package.json'))) {
+    files = {
+      ...files,
+      'package.json': `{ "name": "test-project" }`,
+    };
+  }
+
+  if (!options?.update && !Object.keys(files).some(name => name.includes('tsconfig.json') || name.includes('jsconfig.json'))) {
+    files = {
+      ...files,
+      'tsconfig.json': `{}`,
+    };
+  }
+
+  await Promise.all(Object.keys(files).map(async name => {
+    const fullName = path.join(baseDir, name);
+    if (files[name] === undefined)
+      return;
+    await fs.promises.mkdir(path.dirname(fullName), { recursive: true });
+    await fs.promises.writeFile(fullName, files[name]);
+  }));
+
+  return baseDir;
+}
+
+export async function prepareDebugTest(startClient: StartClient, testFile?: string, clientArgs?: Parameters<StartClient>[0]) {
+  await writeFiles({
+    'a.test.ts': testFile || `
+      import { test, expect } from '@playwright/test';
+      test('fail', async ({ page }) => {
+        await page.setContent('<button>Submit</button>');
+        await expect(page.getByRole('button', { name: 'Missing' })).toBeVisible({ timeout: 1000 });
+      });
+    `
+  });
+
+  const { client } = await startClient(clientArgs);
+  const listResult = await client.callTool({
+    name: 'test_list',
+  });
+  const [, id] = listResult.content[0].text.match(/\[id=([^\]]+)\]/);
+  return { client, id };
+}

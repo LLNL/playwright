@@ -16,8 +16,8 @@
 
 import { ProgramOption } from 'playwright-core/lib/utilsBundle';
 import * as mcpServer from './sdk/server';
-import { commaSeparatedList, dotenvFileLoader, headerParser, numberParser, resolveCLIConfig, semicolonSeparatedList } from './browser/config';
-import { Context } from './browser/context';
+import { commaSeparatedList, dotenvFileLoader, headerParser, numberParser, resolutionParser, resolveCLIConfig, semicolonSeparatedList } from './browser/config';
+import { setupExitWatchdog } from './browser/watchdog';
 import { contextFactory } from './browser/browserContextFactory';
 import { ProxyBackend } from './sdk/proxyBackend';
 import { BrowserServerBackend } from './browser/browserServerBackend';
@@ -27,7 +27,9 @@ import type { Command } from 'playwright-core/lib/utilsBundle';
 import type { MCPProvider } from './sdk/proxyBackend';
 
 export function decorateCommand(command: Command, version: string) {
-  command.option('--allowed-origins <origins>', 'semicolon-separated list of origins to allow the browser to request. Default is to allow all.', semicolonSeparatedList)
+  command
+      .option('--allowed-hosts <hosts...>', 'comma-separated list of hosts this server is allowed to serve from. Defaults to the host the server is bound to. Pass \'*\' to disable the host check.', commaSeparatedList)
+      .option('--allowed-origins <origins>', 'semicolon-separated list of origins to allow the browser to request. Default is to allow all.', semicolonSeparatedList)
       .option('--blocked-origins <origins>', 'semicolon-separated list of origins to block the browser from requesting. Blocklist is evaluated before allowlist. If used without the allowlist, requests not matching the blocklist are still allowed.', semicolonSeparatedList)
       .option('--block-service-workers', 'block service workers')
       .option('--browser <browser>', 'browser or chrome channel to use, possible values: chrome, firefox, webkit, msedge.')
@@ -38,9 +40,11 @@ export function decorateCommand(command: Command, version: string) {
       .option('--device <device>', 'device to emulate, for example: "iPhone 15"')
       .option('--executable-path <path>', 'path to the browser executable.')
       .option('--extension', 'Connect to a running browser instance (Edge/Chrome only). Requires the "Playwright MCP Bridge" browser extension to be installed.')
+      .option('--grant-permissions <permissions...>', 'List of permissions to grant to the browser context, for example "geolocation", "clipboard-read", "clipboard-write".', commaSeparatedList)
       .option('--headless', 'run browser in headless mode, headed by default')
       .option('--host <host>', 'host to bind server to. Default is localhost. Use 0.0.0.0 to bind to all interfaces.')
       .option('--ignore-https-errors', 'ignore https errors')
+      .option('--init-script <path...>', 'path to JavaScript file to add as an initialization script. The script will be evaluated in every page before any of the page\'s scripts. Can be specified multiple times.')
       .option('--isolated', 'keep the browser profile in memory, do not save it to disk.')
       .option('--image-responses <mode>', 'whether to send image responses to the client. Can be "allow" or "omit", Defaults to "allow".')
       .option('--no-sandbox', 'disable the sandbox for all process types that are normally sandboxed.')
@@ -52,13 +56,15 @@ export function decorateCommand(command: Command, version: string) {
       .option('--save-trace', 'Whether to save the Playwright Trace of the session into the output directory.')
       .option('--enhanced-tracing', 'Enable user action recording with trace post-processing')
       .option('--max-actions-per-segment <number>', 'Maximum actions per trace segment for enhanced tracing (default: 120)', numberParser)
+      .option('--save-video <size>', 'Whether to save the video of the session into the output directory. For example "--save-video=800x600"', resolutionParser.bind(null, '--save-video'))
       .option('--secrets <path>', 'path to a file containing secrets in the dotenv format', dotenvFileLoader)
+      .option('--shared-browser-context', 'reuse the same browser context between all connected HTTP clients.')
       .option('--storage-state <path>', 'path to the storage state file for isolated sessions.')
       .option('--timeout-action <timeout>', 'specify action timeout in milliseconds, defaults to 5000ms', numberParser)
       .option('--timeout-navigation <timeout>', 'specify navigation timeout in milliseconds, defaults to 60000ms', numberParser)
       .option('--user-agent <ua string>', 'specify user agent string')
       .option('--user-data-dir <path>', 'path to the user data directory. If not specified, a temporary directory will be created.')
-      .option('--viewport-size <size>', 'specify browser viewport size in pixels, for example "1280, 720"')
+      .option('--viewport-size <size>', 'specify browser viewport size in pixels, for example "1280x720"', resolutionParser.bind(null, '--viewport-size'))
       .addOption(new ProgramOption('--connect-tool', 'Allow to switch between different browser connection methods.').hideHelp())
       .addOption(new ProgramOption('--vision', 'Legacy option, use --caps=vision instead').hideHelp())
       .action(async options => {
@@ -116,22 +122,4 @@ export function decorateCommand(command: Command, version: string) {
         };
         await mcpServer.start(factory, config.server);
       });
-}
-
-function setupExitWatchdog() {
-  let isExiting = false;
-  const handleExit = async () => {
-    if (isExiting)
-      return;
-    isExiting = true;
-    // eslint-disable-next-line no-restricted-properties
-    setTimeout(() => process.exit(0), 15000);
-    await Context.disposeAll();
-    // eslint-disable-next-line no-restricted-properties
-    process.exit(0);
-  };
-
-  process.stdin.on('close', handleExit);
-  process.on('SIGINT', handleExit);
-  process.on('SIGTERM', handleExit);
 }

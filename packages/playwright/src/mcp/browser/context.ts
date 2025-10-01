@@ -14,26 +14,29 @@
  * limitations under the License.
  */
 
+import fs from 'fs';
+import path from 'path';
+
 import { debug } from 'playwright-core/lib/utilsBundle';
 
 import { logUnhandledError } from '../log';
 import { Tab } from './tab';
 import { outputFile  } from './config';
 import * as codegen from './codegen';
+import { dateAsFileName } from './tools/utils';
 
 import type * as playwright from '../../../types/test';
 import type { FullConfig } from './config';
-import type { Tool } from './tools/tool';
-import type { BrowserContextFactory, ClientInfo } from './browserContextFactory';
+import type { BrowserContextFactory, BrowserContextFactoryResult } from './browserContextFactory';
 import type * as actions from './actions';
 import type { SessionLog } from './sessionLog';
 import type { Tracing } from '../../../../playwright-core/src/client/tracing';
 import type { ActionData, SessionSegment } from './enhancedTracing';
+import type { ClientInfo } from '../sdk/server';
 
 const testDebug = debug('pw:mcp:test');
 
 type ContextOptions = {
-  tools: Tool[];
   config: FullConfig;
   browserContextFactory: BrowserContextFactory;
   sessionLog: SessionLog | undefined;
@@ -41,11 +44,10 @@ type ContextOptions = {
 };
 
 export class Context {
-  readonly tools: Tool[];
   readonly config: FullConfig;
   readonly sessionLog: SessionLog | undefined;
   readonly options: ContextOptions;
-  private _browserContextPromise: Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> | undefined;
+  private _browserContextPromise: Promise<BrowserContextFactoryResult> | undefined;
   private _browserContextFactory: BrowserContextFactory;
   private _tabs: Tab[] = [];
   private _currentTab: Tab | undefined;
@@ -62,7 +64,6 @@ export class Context {
   private _enhancedTracingEnabled: boolean = false;
 
   constructor(options: ContextOptions) {
-    this.tools = options.tools;
     this.config = options.config;
     this.sessionLog = options.sessionLog;
     this.options = options;
@@ -122,8 +123,8 @@ export class Context {
     return url;
   }
 
-  async outputFile(name: string): Promise<string> {
-    return outputFile(this.config, this._clientInfo.rootPath, name);
+  async outputFile(fileName: string, options: { origin: 'code' | 'llm' | 'web', reason: string }): Promise<string> {
+    return outputFile(this.config, this._clientInfo, fileName, options);
   }
 
   private _onPageCreated(page: playwright.Page) {
@@ -172,7 +173,21 @@ export class Context {
     await promise.then(async ({ browserContext, close }) => {
       if (this.config.saveTrace)
         await browserContext.tracing.stop();
-      await close();
+      const videos = this.config.saveVideo ? browserContext.pages().map(page => page.video()).filter(video => !!video) : [];
+      await close(async () => {
+        for (const video of videos) {
+          const name = await this.outputFile(dateAsFileName('webm'), { origin: 'code', reason: 'Saving video' });
+          await fs.promises.mkdir(path.dirname(name), { recursive: true });
+          const p = await video.path();
+          // video.saveAs() does not work for persistent contexts.
+          try {
+            if (fs.existsSync(p))
+              await fs.promises.rename(p, name);
+          } catch (e) {
+            logUnhandledError(e);
+          }
+        }
+      });
     });
   }
 
@@ -187,12 +202,12 @@ export class Context {
       await context.route('**', route => route.abort('blockedbyclient'));
 
       for (const origin of this.config.network.allowedOrigins)
-        await context.route(`*://${origin}/**`, route => route.continue());
+        await context.route(originOrHostGlob(origin), route => route.continue());
     }
 
     if (this.config.network?.blockedOrigins?.length) {
       for (const origin of this.config.network.blockedOrigins)
-        await context.route(`*://${origin}/**`, route => route.abort('blockedbyclient'));
+        await context.route(originOrHostGlob(origin), route => route.abort('blockedbyclient'));
     }
   }
 
@@ -211,7 +226,7 @@ export class Context {
     return this._browserContextPromise;
   }
 
-  private async _setupBrowserContext(): Promise<{ browserContext: playwright.BrowserContext, close: () => Promise<void> }> {
+  private async _setupBrowserContext(): Promise<BrowserContextFactoryResult> {
     if (this._closeBrowserContextPromise)
       throw new Error('Another browser context is being closed.');
     // TODO: move to the browser context factory to make it based on isolation mode.
@@ -239,7 +254,7 @@ export class Context {
   }
 
   // Enhanced tracing session management methods
-  
+
   /**
    * Initialize session segment manager for enhanced tracing
    */
@@ -339,7 +354,7 @@ export class Context {
  */
 export class ActionFileWriter {
   private _filePath: string;
-  private _fileHandle: any = null;
+  public fileHandle: any = null;
 
   constructor(filePath: string) {
     this._filePath = filePath;
@@ -351,35 +366,35 @@ export class ActionFileWriter {
   async open(): Promise<void> {
     const fs = await import('fs');
     const path = await import('path');
-    
+
     // Create directory if it doesn't exist
     const dir = path.dirname(this._filePath);
     await fs.promises.mkdir(dir, { recursive: true });
-    
+
     // Open file for appending
-    this._fileHandle = await fs.promises.open(this._filePath, 'a');
+    this.fileHandle = await fs.promises.open(this._filePath, 'a');
   }
 
   /**
    * Append action data to the JSONL file
    */
   async append(actionData: ActionData): Promise<void> {
-    if (!this._fileHandle) {
+    if (!this.fileHandle) {
       throw new Error('ActionFileWriter not opened');
     }
-    
+
     const jsonLine = JSON.stringify(actionData) + '\n';
-    await this._fileHandle.write(jsonLine);
-    await this._fileHandle.sync(); // Ensure data is written to disk
+    await this.fileHandle.write(jsonLine);
+    await this.fileHandle.sync(); // Ensure data is written to disk
   }
 
   /**
    * Close the file handle
    */
   async close(): Promise<void> {
-    if (this._fileHandle) {
-      await this._fileHandle.close();
-      this._fileHandle = null;
+    if (this.fileHandle) {
+      await this.fileHandle.close();
+      this.fileHandle = null;
     }
   }
 }
@@ -433,7 +448,7 @@ export class SessionSegmentManager {
    * Check if segment should rotate based on action count
    */
   shouldRotate(): boolean {
-    return this._currentSegment !== null && 
+    return this._currentSegment !== null &&
            this._currentSegment.actionCount >= this._maxActionsPerSegment;
   }
 
@@ -452,8 +467,8 @@ export class SessionSegmentManager {
    */
   async flushPendingActions(): Promise<void> {
     // Force any pending action file writes to complete
-    if (this._actionFileWriter && this._actionFileWriter._fileHandle) {
-      await this._actionFileWriter._fileHandle.sync();
+    if (this._actionFileWriter && this._actionFileWriter.fileHandle) {
+      await this._actionFileWriter.fileHandle.sync();
     }
   }
 
@@ -473,27 +488,27 @@ export class SessionSegmentManager {
    */
   async finalize(browserContext?: playwright.BrowserContext): Promise<string[]> {
     const enhancedTraceFiles: string[] = [];
-    
+
     try {
       // Close current action file
       if (this._actionFileWriter) {
         await this._actionFileWriter.close();
         this._actionFileWriter = null;
       }
-      
+
       // Stop tracing and process each segment
       for (const segment of this._segments) {
         if (browserContext) {
           // Stop tracing for this segment and save to the segment's trace file
           try {
             await browserContext.tracing.stopChunk({ path: segment.traceFile });
-            
+
             // Post-process the trace file with enhanced action names
             const enhancedTraceFile = await this._postProcessTraceWithActions(
-              segment.traceFile, 
+              segment.traceFile,
               segment.actionFile
             );
-            
+
             if (enhancedTraceFile) {
               enhancedTraceFiles.push(enhancedTraceFile);
             } else {
@@ -507,11 +522,11 @@ export class SessionSegmentManager {
           }
         }
       }
-      
+
     } catch (error) {
       console.error('Error during session finalization:', error);
     }
-    
+
     return enhancedTraceFiles;
   }
 
@@ -519,21 +534,21 @@ export class SessionSegmentManager {
    * Post-process trace file by replacing "Bounding box" with intelligent action names
    */
   private async _postProcessTraceWithActions(
-    traceFilePath: string, 
+    traceFilePath: string,
     actionFilePath: string
   ): Promise<string | null> {
     try {
       const fs = await import('fs');
       const path = await import('path');
       const AdmZip = await import('adm-zip');
-      
+
       // Check if files exist
       if (!await fs.promises.access(traceFilePath).then(() => true).catch(() => false) ||
           !await fs.promises.access(actionFilePath).then(() => true).catch(() => false)) {
         console.warn(`Missing files for post-processing: ${traceFilePath} or ${actionFilePath}`);
         return null;
       }
-      
+
       // Read action data from JSONL file
       const actionData = await fs.promises.readFile(actionFilePath, 'utf-8');
       const actions = actionData.trim().split('\n')
@@ -546,78 +561,78 @@ export class SessionSegmentManager {
           }
         })
         .filter(action => action !== null) as ActionData[];
-      
+
       if (actions.length === 0) {
         console.warn('No valid actions found in JSONL file');
         return traceFilePath; // Return original if no actions to process
       }
-      
+
       // Extract and process trace.zip
       const zip = new (AdmZip.default || AdmZip)(traceFilePath);
       const traceEntry = zip.getEntry('trace.trace');
-      
+
       if (!traceEntry) {
         console.warn('No trace.trace found in ZIP file');
         return traceFilePath;
       }
-      
+
       // Parse trace events
       const traceContent = traceEntry.getData().toString('utf8');
-      const traceLines = traceContent.split('\n').filter(line => line.trim());
+      const traceLines = traceContent.split('\n').filter((line: string) => line.trim());
       const enhancedLines: string[] = [];
-      
+
       // Process each trace event line
       for (const line of traceLines) {
         try {
           const event = JSON.parse(line);
-          
+
           let wasEnhanced = false;
-          
+
           // Look for "Bounding box" events to replace (correct Playwright trace format)
           if (event.type === 'before' && event.title === 'Bounding box') {
-            
+
             // Find matching action from JSONL data by timestamp proximity
             const eventTime = event.wallTime || event.startTime || 0;
             const matchingAction = this._findMatchingAction(actions, eventTime, event);
-            
+
             if (matchingAction) {
               // Replace with intelligent action name
               const enhancedName = this._generateIntelligentActionName(matchingAction);
               event.title = enhancedName;
               wasEnhanced = true;
-              
+
               // Add additional context if available
               if (matchingAction.action.selector && event.params) {
                 event.params.selector = matchingAction.action.selector;
               }
             }
           }
-          
+
           // Look for action-type events (fallback for different trace formats)
-          else if (event.type === 'action' && 
-              event.action && 
+          else if (event.type === 'action' &&
+              event.action &&
               (event.action.name === 'Bounding box' || event.action.name?.includes('Bounding box'))) {
-            
+
             const eventTime = event.timestamp || event.time || 0;
             const matchingAction = this._findMatchingAction(actions, eventTime, event);
-            
+
             if (matchingAction) {
               const enhancedName = this._generateIntelligentActionName(matchingAction);
               event.action.name = enhancedName;
               wasEnhanced = true;
-              
+
               if (matchingAction.action.selector) {
                 event.action.selector = matchingAction.action.selector;
               }
             }
           }
-          
+
           // ENHANCED APPROACH: Also look for any trace events that match our recorded actions
           // This works even if Playwright doesn't generate "Bounding box" entries
           else if (!wasEnhanced) {
             const eventTime = event.wallTime || event.startTime || event.timestamp || event.time || 0;
             const matchingAction = this._findMatchingAction(actions, eventTime, event);
-            
+
             if (matchingAction) {
               // Enhance various event types that might correspond to user actions
               if (event.type === 'before' && event.title) {
@@ -630,7 +645,7 @@ export class SessionSegmentManager {
                 event.action.name = enhancedName;
                 wasEnhanced = true;
               }
-              
+
               // Add selector context if available and event supports it
               if (matchingAction.action.selector) {
                 if (event.params && !event.params.selector) {
@@ -642,18 +657,18 @@ export class SessionSegmentManager {
               }
             }
           }
-          
+
           enhancedLines.push(JSON.stringify(event));
         } catch (parseError) {
           // Keep original line if parsing fails
           enhancedLines.push(line);
         }
       }
-      
+
       // Create enhanced trace file
       const enhancedTraceContent = enhancedLines.join('\n');
       const enhancedZip = new (AdmZip.default || AdmZip)();
-      
+
       // Copy all original entries
       for (const entry of zip.getEntries()) {
         if (entry.entryName === 'trace.trace') {
@@ -662,18 +677,18 @@ export class SessionSegmentManager {
           enhancedZip.addFile(entry.entryName, entry.getData());
         }
       }
-      
+
       // Generate enhanced trace file path
       const dir = path.dirname(traceFilePath);
       const name = path.basename(traceFilePath, '.zip');
       const enhancedPath = path.join(dir, `enhanced-${name}.zip`);
-      
+
       // Write enhanced trace file
       enhancedZip.writeZip(enhancedPath);
-      
+
       console.log(`Enhanced trace created: ${enhancedPath} (${actions.length} actions processed)`);
       return enhancedPath;
-      
+
     } catch (error) {
       console.error('Failed to post-process trace file:', error);
       return null;
@@ -686,17 +701,17 @@ export class SessionSegmentManager {
   private _findMatchingAction(actions: ActionData[], eventTime: number, event: any): ActionData | null {
     // Try to find action within reasonable time window (±2 seconds)
     const timeWindow = 2000;
-    const candidates = actions.filter(action => 
+    const candidates = actions.filter(action =>
       Math.abs(action.timestamp - eventTime) <= timeWindow
     );
-    
+
     if (candidates.length === 0) {
       return null;
     }
-    
+
     // If multiple candidates, prefer the closest in time
-    return candidates.reduce((closest, current) => 
-      Math.abs(current.timestamp - eventTime) < Math.abs(closest.timestamp - eventTime) 
+    return candidates.reduce((closest, current) =>
+      Math.abs(current.timestamp - eventTime) < Math.abs(closest.timestamp - eventTime)
         ? current : closest
     );
   }
@@ -706,37 +721,37 @@ export class SessionSegmentManager {
    */
   private _generateIntelligentActionName(actionData: ActionData): string {
     const action = actionData.action;
-    
+
     switch (action.name?.toLowerCase()) {
       case 'click':
         return `Click ${this._getElementDescription(action.selector)}`;
-      
+
       case 'fill':
       case 'type':
         const content = action.text ? ` "${action.text}"` : '';
         return `Type${content} in ${this._getElementDescription(action.selector)}`;
-      
+
       case 'press':
         return `Press ${action.key || 'Key'}`;
-      
+
       case 'navigate':
         return `Navigate to ${action.url || 'Page'}`;
-      
+
       case 'check':
         return `Check ${this._getElementDescription(action.selector)}`;
-      
+
       case 'uncheck':
         return `Uncheck ${this._getElementDescription(action.selector)}`;
-      
+
       case 'select':
         return `Select ${this._getElementDescription(action.selector)}`;
-      
+
       case 'hover':
         return `Hover ${this._getElementDescription(action.selector)}`;
-      
+
       case 'scroll':
         return `Scroll ${this._getElementDescription(action.selector)}`;
-      
+
       default:
         return `${action.name || 'Action'} ${this._getElementDescription(action.selector)}`;
     }
@@ -747,7 +762,7 @@ export class SessionSegmentManager {
    */
   private _getElementDescription(selector?: string): string {
     if (!selector) return 'Element';
-    
+
     // Extract meaningful parts from selector
     if (selector.includes('[data-testid=')) {
       const testId = selector.match(/\[data-testid=['"]([^'"]+)['"]\]/)?.[1];
@@ -755,7 +770,7 @@ export class SessionSegmentManager {
         return testId.replace(/[-_]/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
       }
     }
-    
+
     if (selector.includes('button')) return 'Button';
     if (selector.includes('input[type="email"]')) return 'Email Field';
     if (selector.includes('input[type="password"]')) return 'Password Field';
@@ -767,24 +782,24 @@ export class SessionSegmentManager {
     if (selector.includes('radio')) return 'Radio Button';
     if (selector.includes('a')) return 'Link';
     if (selector.includes('form')) return 'Form';
-    
+
     // Try to extract ID or class for description
     const idMatch = selector.match(/#([^.\s\[]+)/);
     if (idMatch) {
       return idMatch[1].replace(/[-_]/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
     }
-    
+
     const classMatch = selector.match(/\.([^#.\s\[]+)/);
     if (classMatch) {
       return classMatch[1].replace(/[-_]/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
     }
-    
+
     // Generic element type
     const tagMatch = selector.match(/^([a-zA-Z]+)/);
     if (tagMatch) {
       return tagMatch[1].charAt(0).toUpperCase() + tagMatch[1].slice(1);
     }
-    
+
     return 'Element';
   }
 
@@ -808,7 +823,7 @@ export class SessionSegmentManager {
   private async _createNewSegment(): Promise<void> {
     const segmentNumber = this._segments.length + 1;
     const paddedNumber = segmentNumber.toString().padStart(3, '0');
-    
+
     const traceFile = `${this._sessionDir}/traces/trace-${paddedNumber}.zip`;
     const actionFile = `${this._sessionDir}/actions/actions-${paddedNumber}.jsonl`;
 
@@ -823,6 +838,18 @@ export class SessionSegmentManager {
     this._actionFileWriter = new ActionFileWriter(actionFile);
     await this._actionFileWriter.open();
   }
+}
+
+function originOrHostGlob(originOrHost: string) {
+  try {
+    const url = new URL(originOrHost);
+    // localhost:1234 will parse as protocol 'localhost:' and 'null' origin.
+    if (url.origin !== 'null')
+      return `${url.origin}/**`;
+  } catch {
+  }
+  // Support for legacy host-only mode.
+  return `*://${originOrHost}/**`;
 }
 
 export class InputRecorder {
@@ -849,28 +876,28 @@ export class InputRecorder {
     }, {
       actionAdded: async (page: playwright.Page, data: actions.ActionInContext, code: string) => {
         console.log(`🎯 ActionAdded callback triggered: ${data.action.name}`);
-        
+
         if (this._context.isRunningTool()) {
           console.log(`❌ Skipping action - tool is running`);
           return;
         }
         console.log(`✅ Tool not running, proceeding with action`);
-        
+
         const tab = Tab.forPage(page);
         if (tab) {
           console.log(`✅ Found tab for page, logging action`);
           sessionLog.logUserAction(data.action, tab, code, false);
-          
+
           // Also record in enhanced tracing system if active
           if (this._context.isUserSessionActive() && this._context.isEnhancedTracingEnabled()) {
             console.log(`✅ Enhanced tracing active, checking session manager`);
             const sessionManager = this._context.getSessionSegmentManager();
             if (sessionManager) {
               console.log(`✅ Session manager found, recording action: ${data.action.name}`);
-              
+
               // Generate "Bounding box" trace entry for this user action
               await this._generateBoundingBoxTraceEntry(page, data);
-              
+
               const actionData: ActionData = {
                 timestamp: performance.now(),
                 callId: `action_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -882,7 +909,7 @@ export class InputRecorder {
                   url: (data.action as any).url
                 }
               };
-              
+
               sessionManager.recordAction(actionData).catch(error => {
                 console.error('Failed to record action in session manager:', error);
               });
@@ -932,8 +959,8 @@ export class InputRecorder {
         // This triggers Playwright's internal trace generation for bounding box
         const element = await page.locator(selector).first();
         await element.boundingBox().catch(() => null);
-        
-        // The boundingBox() call above automatically adds a "Bounding box" entry 
+
+        // The boundingBox() call above automatically adds a "Bounding box" entry
         // to Playwright's trace, which our post-processing can then enhance
       }
     } catch (error) {

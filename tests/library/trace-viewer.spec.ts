@@ -1463,7 +1463,8 @@ test('should remove noscript when javaScriptEnabled is set to true', async ({ br
   await expect(frame.getByText('Enable JavaScript to run this app.')).toBeHidden();
 });
 
-test('should open snapshot in new browser context', async ({ browser, page, runAndTrace, server }) => {
+test('should open snapshot in new browser context', async ({ browser, page, runAndTrace, server, channel }) => {
+  test.skip(channel === 'webkit-wsl', 'Trace Viewer opens via ipv6 address which is not supported in WSL');
   const traceViewer = await runAndTrace(async () => {
     await page.goto(server.EMPTY_PAGE);
     await page.setContent('hello');
@@ -1954,7 +1955,7 @@ test('should load trace from HTTP with progress indicator', async ({ showTraceVi
   await expect(traceViewer.actionTitles).toContainText([/Create page/]);
 });
 
-test('should show all actions', async ({ runAndTrace, page }) => {
+test('should filter actions', async ({ runAndTrace, page }) => {
   const traceViewer = await runAndTrace(async () => {
     await page.route('**/*', async route => {
       await route.fulfill({ contentType: 'text/html', body: '<input type=checkbox checked>' });
@@ -1968,9 +1969,25 @@ test('should show all actions', async ({ runAndTrace, page }) => {
     /Navigate to/,
     /Expect "toBeChecked"/,
   ]);
+  await expect(traceViewer.page.getByText('3 hidden', { exact: true })).toBeVisible();
 
-  await traceViewer.showAllActions();
+  await traceViewer.page.getByRole('button', { name: 'Filter actions' }).click();
+  await expect(traceViewer.page.getByTestId('actions-filter-dialog')).toMatchAriaSnapshot(`
+    - dialog:
+      - checkbox "Getters 1"
+      - checkbox "Network routes 2"
+      - checkbox "Configuration"
+  `);
 
+  await traceViewer.page.locator('.setting').getByText('Getters').click();
+  await expect(traceViewer.actionTitles).toHaveText([
+    /Navigate to/,
+    /Get attribute "checked"/,
+    /Expect "toBeChecked"/,
+  ]);
+  await expect(traceViewer.page.getByText('2 hidden', { exact: true })).toBeVisible();
+
+  await traceViewer.page.locator('.setting').getByText('Network routes').click();
   await expect(traceViewer.actionTitles).toHaveText([
     /Route requests/,
     /Navigate to/,
@@ -2019,4 +2036,43 @@ test.describe(() => {
     const frame = await traceViewer.snapshotFrame('Expect');
     await expect(frame.getByRole('button')).toHaveCSS('color', 'rgb(255, 0, 0)');
   });
+});
+
+test('should survive service worker restart', async ({ page, runAndTrace, server }) => {
+  const traceViewer = await runAndTrace(async () => {
+    await page.goto(server.EMPTY_PAGE);
+    await page.setContent('Old world');
+    await page.evaluate(() => document.body.textContent = 'New world');
+  });
+  const snapshot1 = await traceViewer.snapshotFrame('Evaluate');
+  await expect(snapshot1.locator('body')).toHaveText('New world');
+
+  const status = await traceViewer.page.evaluate(async () => {
+    const response = await fetch('restartServiceWorker');
+    return response.status;
+  });
+  expect(status).toBe(200);
+
+  const snapshot2 = await traceViewer.snapshotFrame('Set content');
+  await expect(snapshot2.locator('body')).toHaveText('Old world');
+});
+
+test('should survive ping after service worker restart', async ({ page, runAndTrace, server }) => {
+  const traceViewer = await runAndTrace(async () => {
+    await page.goto(server.EMPTY_PAGE);
+    await page.setContent('Old world');
+    await page.evaluate(() => document.body.textContent = 'New world');
+  });
+  const snapshot1 = await traceViewer.snapshotFrame('Evaluate');
+  await expect(snapshot1.locator('body')).toHaveText('New world');
+
+  const status = await traceViewer.page.evaluate(async () => {
+    const response1 = await fetch('restartServiceWorker');
+    const response2 = await fetch('ping');
+    return response1.status + '/' + response2.status;
+  });
+  expect(status).toBe('200/200');
+
+  const snapshot2 = await traceViewer.snapshotFrame('Set content');
+  await expect(snapshot2.locator('body')).toHaveText('Old world');
 });

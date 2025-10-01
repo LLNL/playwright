@@ -20,6 +20,7 @@ import './settingsView.css';
 export type Setting = {
   name: string;
   title?: string;
+  count?: number;
 } & ({
   type: 'check',
   value: boolean;
@@ -37,10 +38,10 @@ export const SettingsView: React.FunctionComponent<{
   return (
     <div className='vbox settings-view'>
       {settings.map(setting => {
-        const labelId = `setting-${setting.name}`;
+        const labelId = `setting-${setting.name.replaceAll(/\s+/g, '-')}`;
 
         return (
-          <div key={setting.name} className='setting' title={setting.title}>
+          <div key={setting.name} className={`setting setting-${setting.type}`} title={setting.title}>
             {renderSetting(setting, labelId)}
           </div>
         );
@@ -60,13 +61,13 @@ const renderSetting = (setting: Setting, labelId: string) => {
             checked={setting.value}
             onChange={() => setting.set(!setting.value)}
           />
-          <label htmlFor={labelId}>{setting.name}</label>
+          <label htmlFor={labelId}>{setting.name}{!!setting.count && <span className='setting-counter'>{setting.count}</span>}</label>
         </>
       );
     case 'select':
       return (
         <>
-          <label htmlFor={labelId}>{setting.name}</label>
+          <label htmlFor={labelId}>{setting.name}:{!!setting.count && <span className='setting-counter'>{setting.count}</span>}</label>
           <select id={labelId} value={setting.value} onChange={e => setting.set(e.target.value)}>
             {setting.options.map(option => (
               <option key={option.value} value={option.value}>

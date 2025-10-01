@@ -19,7 +19,7 @@ import fs from 'fs';
 import { ChildProcess, spawn } from 'child_process';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { test as baseTest, expect, programPath } from './fixtures';
+import { test as baseTest, expect, mcpServerPath } from './fixtures';
 
 import type { Config } from '../../packages/playwright/src/mcp/config';
 
@@ -32,7 +32,7 @@ const test = baseTest.extend<{ serverEndpoint: (options?: { args?: string[], noP
         throw new Error('Process already running');
 
       cp = spawn('node', [
-        ...programPath,
+        ...mcpServerPath,
         ...(options?.noPort ? [] : ['--port=0']),
         '--user-data-dir=' + userDataDir,
         ...(mcpHeadless ? ['--headless'] : []),
@@ -228,4 +228,67 @@ test('sse transport browser lifecycle (persistent, multiclient)', async ({ serve
 
   await client1.close();
   await client2.close();
+});
+
+test('sse transport shared context', async ({ serverEndpoint, server }) => {
+  const { url, stderr } = await serverEndpoint({ args: ['--shared-browser-context'] });
+
+  // Create first client and navigate
+  const transport1 = new SSEClientTransport(new URL('/sse', url));
+  const client1 = new Client({ name: 'test1', version: '1.0.0' });
+  await client1.connect(transport1);
+  await client1.callTool({
+    name: 'browser_navigate',
+    arguments: { url: server.HELLO_WORLD },
+  });
+
+  // Create second client - should reuse the same browser context
+  const transport2 = new SSEClientTransport(new URL('/sse', url));
+  const client2 = new Client({ name: 'test2', version: '1.0.0' });
+  await client2.connect(transport2);
+
+  // Get tabs from second client - should see the tab created by first client
+  const tabsResult = await client2.callTool({
+    name: 'browser_tabs',
+    arguments: { action: 'list' },
+  });
+
+  // Should have at least one tab (the one created by client1)
+  expect(tabsResult.content[0]?.text).toContain('tabs');
+
+  await client1.close();
+
+  // Second client should still work since context is shared
+  await client2.callTool({
+    name: 'browser_snapshot',
+    arguments: {},
+  });
+
+  await client2.close();
+
+  await expect(async () => {
+    const lines = stderr().split('\n');
+    expect(lines.filter(line => line.match(/create SSE session/)).length).toBe(2);
+    expect(lines.filter(line => line.match(/delete SSE session/)).length).toBe(2);
+
+    // Should have only one context creation since it's shared
+    expect(lines.filter(line => line.match(/create shared browser context/)).length).toBe(1);
+
+    // Should see client connect/disconnect messages
+    expect(lines.filter(line => line.match(/shared context client connected/)).length).toBe(2);
+    expect(lines.filter(line => line.match(/shared context client disconnected/)).length).toBe(2);
+    expect(lines.filter(line => line.match(/create context/)).length).toBe(2);
+    expect(lines.filter(line => line.match(/close context/)).length).toBe(2);
+
+    // Context should only close when the server shuts down.
+    expect(lines.filter(line => line.match(/close browser context complete \(persistent\)/)).length).toBe(0);
+  }).toPass();
+
+  await fetch(new URL('/killkillkill', url).href).catch(() => {});
+
+  await expect(async () => {
+    const lines = stderr().split('\n');
+    // Context should only close when the server shuts down.
+    expect(lines.filter(line => line.match(/close browser context complete \(persistent\)/)).length).toBe(1);
+  }).toPass();
 });

@@ -15,73 +15,76 @@
  */
 
 import * as mcp from '../sdk/exports';
-import * as mcpBundle from '../sdk/bundle';
-
-import { snapshot, pickLocator, evaluate } from './browserTools';
+import { currentTestInfo } from '../../common/globals';
 import { stripAnsiEscapes } from '../../util';
+import { defaultConfig, FullConfig } from '../browser/config';
+import { BrowserServerBackend } from '../browser/browserServerBackend';
+import { Tab } from '../browser/tab';
 
-import type { BrowserTool } from './browserTool';
 import type * as playwright from '../../../index';
-import type { ServerBackendOnPause } from '../sdk/mdb';
+import type { Page } from '../../../../playwright-core/src/client/page';
+import type { BrowserContextFactory } from '../browser/browserContextFactory';
+import type { ClientInfo } from '../sdk/server';
 
-type PageEx = playwright.Page & {
-  _snapshotForAI: () => Promise<string>;
-};
+export async function runBrowserBackendAtEnd(context: playwright.BrowserContext, errorMessage?: string) {
+  const testInfo = currentTestInfo();
+  if (!testInfo)
+    return;
 
-const tools = [snapshot, pickLocator, evaluate];
+  const shouldPause = errorMessage ? testInfo?._pauseOnError() : testInfo?._pauseAtEnd();
+  if (!shouldPause)
+    return;
 
-export class BrowserBackend implements ServerBackendOnPause {
-  readonly name = 'Playwright';
-  readonly version = '0.0.1';
-  private _tools: BrowserTool<any>[] = tools;
-  private _page: playwright.Page;
+  const lines: string[] = [];
+  if (errorMessage)
+    lines.push(`### Paused on error:`, stripAnsiEscapes(errorMessage));
+  else
+    lines.push(`### Paused at end of test. ready for interaction`);
 
-  constructor(page: playwright.Page) {
-    this._page = page;
-  }
-
-  async initialize() {
-  }
-
-  async listTools(): Promise<mcp.Tool[]> {
-    return [...this._tools.map(tool => mcp.toMcpTool(tool.schema)), mcp.toMcpTool(doneToolSchema)];
-  }
-
-  async callTool(name: string, args: mcp.CallToolRequest['params']['arguments']): Promise<mcp.CallToolResult> {
-    if (name === 'done') {
-      (this as ServerBackendOnPause).requestSelfDestruct?.();
-      return {
-        content: [{ type: 'text', text: 'Done' }],
-      };
+  for (let i = 0; i < context.pages().length; i++) {
+    const page = context.pages()[i];
+    const stateSuffix = context.pages().length > 1 ? (i + 1) + ' of ' + (context.pages().length) : 'state';
+    lines.push(
+        '',
+        `### Page ${stateSuffix}`,
+        `- Page URL: ${page.url()}`,
+        `- Page Title: ${await page.title()}`.trim()
+    );
+    // Only print console errors when pausing on error, not when everything works as expected.
+    let console = errorMessage ? await Tab.collectConsoleMessages(page) : [];
+    console = console.filter(msg => !msg.type || msg.type === 'error');
+    if (console.length) {
+      lines.push('- Console Messages:');
+      for (const message of console)
+        lines.push(`  - ${message.toString()}`);
     }
-
-    const tool = this._tools.find(tool => tool.schema.name === name);
-    if (!tool)
-      throw new Error(`Tool not found: ${name}. Available tools: ${this._tools.map(tool => tool.schema.name).join(', ')}`);
-    const parsedArguments = tool.schema.inputSchema.parse(args || {});
-    return await tool.handle(this._page, parsedArguments);
+    lines.push(
+        `- Page Snapshot:`,
+        '```yaml',
+        await (page as Page)._snapshotForAI(),
+        '```',
+    );
   }
+
+  lines.push('');
+  if (errorMessage)
+    lines.push(`### Task`, `Try recovering from the error prior to continuing`);
+
+  const config: FullConfig = {
+    ...defaultConfig,
+    capabilities: ['testing'],
+  };
+
+  await mcp.runOnPauseBackendLoop(new BrowserServerBackend(config, identityFactory(context)), lines.join('\n'));
 }
 
-const doneToolSchema = mcp.defineToolSchema({
-  name: 'done',
-  title: 'Done',
-  description: 'Done',
-  inputSchema: mcpBundle.z.object({}),
-  type: 'destructive',
-});
-
-export async function runBrowserBackendOnError(page: playwright.Page, message: () => string) {
-  if (!process.env.PLAYWRIGHT_DEBUGGER_ENABLED)
-    return;
-  const snapshot = await (page as PageEx)._snapshotForAI();
-  const introMessage = `### Paused on error:
-${stripAnsiEscapes(message())}
-
-### Current page snapshot:
-${snapshot}
-
-### Task
-Try recovering from the error prior to continuing, use following tools to recover: ${tools.map(tool => tool.schema.name).join(', ')}`;
-  await mcp.runOnPauseBackendLoop(process.env.PLAYWRIGHT_MDB_URL!, new BrowserBackend(page), introMessage);
+function identityFactory(browserContext: playwright.BrowserContext): BrowserContextFactory {
+  return {
+    createContext: async (clientInfo: ClientInfo, abortSignal: AbortSignal, toolName: string | undefined) => {
+      return {
+        browserContext,
+        close: async () => {}
+      };
+    }
+  };
 }

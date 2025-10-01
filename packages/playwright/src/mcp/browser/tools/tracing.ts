@@ -38,7 +38,7 @@ const tracingStart = defineTool({
   handle: async (context, params, response) => {
     const typedParams = params as EnhancedTracingParams;
     const browserContext = await context.ensureBrowserContext();
-    const tracesDir = await context.outputFile(`traces`);
+    const tracesDir = await context.outputFile(`traces`, { origin: 'code', reason: 'Collecting trace' });
     const name = 'trace-' + Date.now();
 
     // Use CLI config as defaults for enhanced tracing
