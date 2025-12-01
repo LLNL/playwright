@@ -1,0 +1,14 @@
+{
+  "name": "browser-recording-session",
+  "version": "1.0.0",
+  "description": "Standalone browser session recorder that captures **user actions** (not programmatic test scripts) for AI-powered vectorization and question answering.",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "build": "npx tsc -p ./tsconfig.json",
+    "start": "npx tsx test-browser-session-recorder.ts",
+    "dev": "npm run build && npm start"
+  }
+}
