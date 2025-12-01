@@ -54,6 +54,8 @@ export function decorateCommand(command: Command, version: string) {
       .option('--proxy-server <proxy>', 'specify proxy server, for example "http://myproxy:3128" or "socks5://myproxy:8080"')
       .option('--save-session', 'Whether to save the Playwright MCP session into the output directory.')
       .option('--save-trace', 'Whether to save the Playwright Trace of the session into the output directory.')
+      .option('--enhanced-tracing', 'Enable user action recording with trace post-processing')
+      .option('--max-actions-per-segment <number>', 'Maximum actions per trace segment for enhanced tracing (default: 120)', numberParser)
       .option('--save-video <size>', 'Whether to save the video of the session into the output directory. For example "--save-video=800x600"', resolutionParser.bind(null, '--save-video'))
       .option('--secrets <path>', 'path to a file containing secrets in the dotenv format', dotenvFileLoader)
       .option('--shared-browser-context', 'reuse the same browser context between all connected HTTP clients.')

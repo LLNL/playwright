@@ -55,6 +55,8 @@ export type CLIOptions = {
   proxyServer?: string;
   saveSession?: boolean;
   saveTrace?: boolean;
+  enhancedTracing?: boolean;
+  maxActionsPerSegment?: number;
   saveVideo?: ViewportSize;
   secrets?: Record<string, string>;
   sharedBrowserContext?: boolean;
@@ -229,7 +231,7 @@ export function configFromCLIOptions(cliOptions: CLIOptions): Config {
       allowedOrigins: cliOptions.allowedOrigins,
       blockedOrigins: cliOptions.blockedOrigins,
     },
-    saveSession: cliOptions.saveSession,
+    saveSession: cliOptions.saveSession || cliOptions.enhancedTracing,
     saveTrace: cliOptions.saveTrace,
     saveVideo: cliOptions.saveVideo,
     secrets: cliOptions.secrets,

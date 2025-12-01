@@ -113,6 +113,18 @@ export type Config = {
   saveTrace?: boolean;
 
   /**
+   * Enable intelligent action recording with enhanced trace post-processing.
+   * Replaces "Bounding box" entries with meaningful action names like "Click Submit Button".
+   */
+  enhancedTracing?: boolean;
+
+  /**
+   * Maximum actions per trace segment for enhanced tracing. Defaults to 120.
+   * When this limit is reached, a new trace segment is created automatically.
+   */
+  maxActionsPerSegment?: number;
+
+  /**
    * If specified, saves the Playwright video of the session into the output directory.
    */
   saveVideo?: {
