@@ -37,3 +37,4 @@ test-results
 playwright.env
 /firefox/
 playwright-mcp-output/
+.playwright-mcp/
