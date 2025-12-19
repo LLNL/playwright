@@ -20,6 +20,7 @@ import { VoiceRecorderProcess } from './voice';
 
 // Import real SessionRecorder from parent session-recorder package
 import { SessionRecorder } from 'session-recorder';
+import { SessionRecorderOptions } from '../../../dist/src/node/SessionRecorder';
 
 export type RecordingState = 'idle' | 'starting' | 'recording' | 'stopping' | 'processing';
 
@@ -215,7 +216,7 @@ export class RecordingOrchestrator extends EventEmitter {
     // we copy files to user's configured output directory after recording
 
     // Create the recorder with proper options
-    const recorder = new SessionRecorder(this.sessionId!, {
+    const recorder = new SessionRecorder(this.sessionId!, <SessionRecorderOptions>{
       browser_record: true,
       voice_record: false,  // Desktop app handles voice recording separately
       compress_snapshots: this.config.compressSnapshots,
