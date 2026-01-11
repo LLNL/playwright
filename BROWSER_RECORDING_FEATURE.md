@@ -128,7 +128,7 @@ When Playwright trace viewer opens, verify:
 
 ### ✅ Intelligent Action Names
 - **Instead of**: "Bounding box"
-- **Should see**: 
+- **Should see**:
   - "Click Submit Button"
   - "Type Email Address"
   - "Navigate to https://example.com"
@@ -166,7 +166,7 @@ When Playwright trace viewer opens, verify:
 ### Live Tests
 ```
 ✅ SSE transport connection successful
-✅ Real-time enhanced tracing operational  
+✅ Real-time enhanced tracing operational
 ✅ Multiple trace segments handled correctly
 ✅ Mixed programmatic and user actions captured
 ```
@@ -197,7 +197,7 @@ When Playwright trace viewer opens, verify:
 
 The test suite validates:
 - ✅ Core implementation structure
-- ✅ Enhanced tracing tool parameters  
+- ✅ Enhanced tracing tool parameters
 - ✅ Session segment management
 - ✅ JSONL action file storage
 - ✅ ZIP post-processing pipeline

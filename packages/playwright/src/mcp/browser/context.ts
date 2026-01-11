@@ -24,6 +24,7 @@ import { Tab } from './tab';
 import { outputFile  } from './config';
 import * as codegen from './codegen';
 import { dateAsFileName } from './tools/utils';
+import { SimpleSessionRecorder } from './simpleSessionRecorder';
 
 import type * as playwright from '../../../types/test';
 import type { FullConfig } from './config';
@@ -33,6 +34,7 @@ import type { SessionLog } from './sessionLog';
 import type { Tracing } from '../../../../playwright-core/src/client/tracing';
 import type { ActionData, SessionSegment } from './enhancedTracing';
 import type { ClientInfo } from '../sdk/server';
+import type { BrowserContext as ServerBrowserContext } from '../../../../playwright-core/src/server/browserContext';
 
 const testDebug = debug('pw:mcp:test');
 
@@ -63,6 +65,9 @@ export class Context {
   private _userSessionActive: boolean = false;
   private _enhancedTracingEnabled: boolean = false;
   private _inputRecorder: InputRecorder | undefined;
+
+  // Simple session recorder using Snapshotter & HarTracer
+  private _simpleSessionRecorder: SimpleSessionRecorder | undefined;
 
   constructor(options: ContextOptions) {
     this.config = options.config;
@@ -194,13 +199,19 @@ export class Context {
 
   async dispose() {
     this._abortController.abort('MCP context disposed');
-    
+
+    // Dispose simple session recorder if active
+    if (this._simpleSessionRecorder) {
+      await this._simpleSessionRecorder.dispose();
+      this._simpleSessionRecorder = undefined;
+    }
+
     // Dispose input recorder to flush pending actions
     if (this._inputRecorder) {
       await this._inputRecorder.dispose();
       this._inputRecorder = undefined;
     }
-    
+
     await this.closeBrowserContext();
     Context._allContexts.delete(this);
   }
@@ -320,9 +331,8 @@ export class Context {
   async flushInputRecorder(): Promise<void> {
     // Force any pending recorder actions to be processed
     // This ensures all actions are captured before session finalization
-    if (this._sessionSegmentManager) {
+    if (this._sessionSegmentManager)
       await this._sessionSegmentManager.flushPendingActions();
-    }
   }
 
   /**
@@ -338,6 +348,65 @@ export class Context {
     this._userSessionActive = false;
     this._enhancedTracingEnabled = false;
     return [];
+  }
+
+  // Simple Session Recorder methods (using Snapshotter & HarTracer directly)
+
+  /**
+   * Start simple session recording with Snapshotter and HarTracer
+   * This captures interactive HTML snapshots and HTTP requests without complex trace processing
+   */
+  async startSimpleSessionRecording(outputDir: string): Promise<void> {
+    if (this._simpleSessionRecorder)
+      throw new Error('Simple session recording already active');
+
+
+    const { browserContext } = await this._ensureBrowserContext();
+
+    // Access the server-side BrowserContext from the client-side proxy
+    console.log('browserContext type:', typeof browserContext);
+    console.log('browserContext has _channel?', '_channel' in browserContext);
+    console.log('browserContext._channel:', (browserContext as any)._channel);
+    console.log('browserContext._channel._object:', (browserContext as any)._channel?._object);
+
+    const serverContext = (browserContext as any)._channel?._object as ServerBrowserContext;
+    if (!serverContext)
+      throw new Error('Cannot access server-side BrowserContext');
+
+    this._simpleSessionRecorder = new SimpleSessionRecorder(serverContext, outputDir);
+    await this._simpleSessionRecorder.start();
+
+    testDebug('Simple session recording started');
+  }
+
+  /**
+   * Stop simple session recording and save data
+   */
+  async stopSimpleSessionRecording(sessionName: string): Promise<string | undefined> {
+    if (!this._simpleSessionRecorder) {
+      return undefined;
+    }
+
+    const sessionFile = await this._simpleSessionRecorder.saveSession(sessionName);
+    await this._simpleSessionRecorder.dispose();
+    this._simpleSessionRecorder = undefined;
+
+    testDebug('Simple session recording stopped');
+    return sessionFile;
+  }
+
+  /**
+   * Get simple session recorder summary
+   */
+  getSimpleSessionSummary() {
+    return this._simpleSessionRecorder?.getSummary();
+  }
+
+  /**
+   * Check if simple session recording is active
+   */
+  isSimpleSessionRecording(): boolean {
+    return this._simpleSessionRecorder !== undefined;
   }
 
   /**
@@ -863,10 +932,10 @@ function originOrHostGlob(originOrHost: string) {
 export class InputRecorder {
   private _context: Context;
   private _browserContext: playwright.BrowserContext;
-  private _pendingFillActions: Map<string, { 
-    data: actions.ActionInContext, 
+  private _pendingFillActions: Map<string, {
+    data: actions.ActionInContext,
     timeout: NodeJS.Timeout,
-    accumulatedText: string 
+    accumulatedText: string
   }> = new Map();
   private _fillDebounceMs = 500; // Wait 500ms after last keystroke
 
@@ -900,12 +969,12 @@ export class InputRecorder {
   private async _initialize() {
     console.log('🎯 InputRecorder initializing...');
     const sessionLog = this._context.sessionLog!;
-    
+
     // Handle page events to ensure recorder stays active across navigation
     this._browserContext.on('page', (page) => {
       console.log(`🎯 New page created during recording: ${page.url()}`);
     });
-    
+
     await (this._browserContext as any)._enableRecorder({
       mode: 'recording',
       recorderMode: 'api',
@@ -940,19 +1009,19 @@ export class InputRecorder {
           return;
         if (data.signal.name !== 'navigation')
           return;
-        
+
         console.log(`🎯 Navigation signal detected: ${data.signal.url}`);
-        
+
         const tab = Tab.forPage(page);
         const navigateAction: actions.Action = {
           name: 'navigate',
           url: data.signal.url,
           signals: [],
         };
-        
+
         if (tab) {
           sessionLog.logUserAction(navigateAction, tab, `await page.goto('${data.signal.url}');`, false);
-          
+
           // Also record in enhanced tracing system if active
           if (this._context.isUserSessionActive() && this._context.isEnhancedTracingEnabled()) {
             console.log(`✅ Enhanced tracing active, recording navigation`);
@@ -1013,7 +1082,7 @@ export class InputRecorder {
     const timeout = setTimeout(async () => {
       console.log(`🎯 Fill debounce timeout reached, processing complete text: "${accumulatedText}"`);
       this._pendingFillActions.delete(actionKey);
-      
+
       // Create enhanced action data with complete text
       const enhancedData = {
         ...data,
@@ -1042,26 +1111,26 @@ export class InputRecorder {
 
   /**
    * Process an action (both fill and non-fill actions)
+   *
+   * Note: User actions have already been executed by the time this callback is triggered,
+   * so we can only capture the "after" state, not the "before" state. This is different
+   * from programmatic actions which go through Playwright's instrumentation and get
+   * full before/after snapshot capture.
    */
   private async _processAction(page: playwright.Page, data: actions.ActionInContext, code: string, isUpdate: boolean) {
     const tab = Tab.forPage(page);
     if (tab) {
-      console.log(`✅ Found tab for page, logging action: ${data.action.name}`);
+      testDebug(`Found tab for page, logging action: ${data.action.name}`);
       const sessionLog = this._context.sessionLog!;
       sessionLog.logUserAction(data.action, tab, code, isUpdate);
 
-      // Also record in enhanced tracing system if active
+      // Record in enhanced tracing system if active
       if (this._context.isUserSessionActive() && this._context.isEnhancedTracingEnabled()) {
-        console.log(`✅ Enhanced tracing active, checking session manager`);
+        testDebug(`Enhanced tracing active, recording user action: ${data.action.name}`);
         const sessionManager = this._context.getSessionSegmentManager();
         if (sessionManager) {
-          console.log(`✅ Session manager found, recording action: ${data.action.name}`);
-
-          // Generate "Bounding box" trace entry for this user action
-          await this._generateBoundingBoxTraceEntry(page, data);
-
           const actionData: ActionData = {
-            timestamp: performance.now(),
+            timestamp: Date.now(),
             callId: `action_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
             action: {
               name: data.action.name,
@@ -1072,39 +1141,13 @@ export class InputRecorder {
             }
           };
 
+          // Record the action to JSONL - snapshots will be captured by Playwright's
+          // normal tracing if saveTrace is enabled
           sessionManager.recordAction(actionData).catch(error => {
-            console.error('Failed to record action in session manager:', error);
+            testDebug('Failed to record action in session manager:', error);
           });
-        } else {
-          console.log(`❌ No session manager found`);
         }
-      } else {
-        console.log(`❌ Enhanced tracing not active: userSession=${this._context.isUserSessionActive()}, enhanced=${this._context.isEnhancedTracingEnabled()}`);
       }
-    } else {
-      console.log(`❌ No tab found for page`);
-    }
-  }
-
-  /**
-   * Trigger Playwright's bounding box trace generation for user actions
-   * This causes Playwright to automatically add "Bounding box" entries to the trace
-   */
-  private async _generateBoundingBoxTraceEntry(page: playwright.Page, data: actions.ActionInContext) {
-    try {
-      const selector = (data.action as any).selector;
-      if (selector) {
-        // Get the element that was interacted with and call boundingBox()
-        // This triggers Playwright's internal trace generation for bounding box
-        const element = await page.locator(selector).first();
-        await element.boundingBox().catch(() => null);
-
-        // The boundingBox() call above automatically adds a "Bounding box" entry
-        // to Playwright's trace, which our post-processing can then enhance
-      }
-    } catch (error) {
-      // Don't let bounding box generation errors break the recording
-      console.warn('Failed to trigger bounding box trace entry:', error);
     }
   }
 

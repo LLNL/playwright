@@ -32,7 +32,7 @@
     "skipLibCheck": true,
   },
   "compileOnSave": true,
-  "include": ["packages"],
+  "include": ["packages", "browser-recording-session", "browser-recording-session-2/index.ts", "browser-recording-session-2/sessionRecorder.ts", "browser-recording-session-2/snapshotterInjected.ts", "browser-recording-session-2/types.ts", "browser-recording-session-2/index.ts", "browser-recording-session-2/sessionRecorder.ts", "browser-recording-session-2/snapshotterInjected.ts", "browser-recording-session-2/types.ts"],
   "exclude": [
     "packages/*/lib",
     "packages/html-reporter/",
